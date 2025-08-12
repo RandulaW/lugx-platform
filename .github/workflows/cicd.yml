@@ -1,18 +1,19 @@
-name: "CI-CD (monorepo: build, deploy, test)"
+name: "CI-CD (monorepo - build, deploy, test)"
 
 on:
   push:
     branches: [ "main" ]
   workflow_dispatch: {}
   schedule:
-    - cron: "0 */12 * * *"   # every 12h: tests only, no rebuild (saves cost)
+    - cron: "0 */12 * * *"   # every 12h: tests only (no rebuild -> saves cost)
 
 jobs:
   build-deploy-test:
+    name: "${{ matrix.id }} — build/deploy/test"
     runs-on: ubuntu-latest
 
     strategy:
-      # Keep it gentle; GitHub runners do the heavy work, EC2 only rolls pods
+      fail-fast: false
       max-parallel: 2
       matrix:
         include:
@@ -57,7 +58,8 @@ jobs:
 
       - name: Set image tag (short SHA)
         id: vars
-        run: echo "TAG=${GITHUB_SHA::12}" >> $GITHUB_OUTPUT
+        shell: bash
+        run: echo "TAG=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Build & Push ${{ matrix.id }} (skip on schedule)
         if: github.event_name != 'schedule'
@@ -70,27 +72,47 @@ jobs:
             ${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}:latest
 
       - name: Add EC2 to known_hosts
+        shell: bash
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.EC2_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Write SSH key
+        shell: bash
         run: |
           echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key
           chmod 600 ec2_key
 
       - name: Rolling update ${{ matrix.id }} (skip on schedule)
         if: github.event_name != 'schedule'
+        shell: bash
         run: |
-          ssh -i ec2_key -o StrictHostKeyChecking=yes ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+          ssh -i ec2_key -o StrictHostKeyChecking=yes "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" <<'EOSSH'
             set -euo pipefail
-            kubectl set image deploy/${{ matrix.deployment }} ${{ matrix.container }}=${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}:${{ steps.vars.outputs.TAG }} --record
-            kubectl rollout status deploy/${{ matrix.deployment }} --timeout=180s
-          EOF
+            DEP="${{ matrix.deployment }}"
+            CN="${{ matrix.container }}"
+            IMG="${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}:${{ steps.vars.outputs.TAG }}"
+            echo "Setting image: deploy=$DEP container=$CN image=$IMG"
+
+            # Retry a few times in case API/etcd is slow under load
+            i=1
+            until kubectl --request-timeout=60s set image deploy/"$DEP" "$CN"="$IMG" ; do
+              if [ $i -ge 3 ]; then
+                echo "set image failed after $i attempts"
+                exit 1
+              fi
+              echo "Retrying set image ($i/3)..."
+              sleep $((i*10))
+              i=$((i+1))
+            done
+
+            kubectl rollout status deploy/"$DEP" --timeout=300s
+          EOSSH
 
       - name: Integration tests (always)
+        shell: bash
         run: |
-          ssh -i ec2_key -o StrictHostKeyChecking=yes ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+          ssh -i ec2_key -o StrictHostKeyChecking=yes "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" <<'EOSSH'
             set -euo pipefail
             kubectl delete pod test-runner --ignore-not-found
             kubectl run test-runner --image=curlimages/curl:8.8.0 -i --restart=Never --command -- sleep 120 >/dev/null 2>&1 &
@@ -99,18 +121,16 @@ jobs:
             PASS=1
             for URL in ${{ matrix.test_urls }}; do
               echo "Testing: $URL"
-              kubectl exec test-runner -- sh -lc "curl -sS -o /dev/null -w '%{http_code}' $URL" > /tmp/status.txt
-              STATUS=$(cat /tmp/status.txt)
-              echo "Status: $STATUS"
-              if [ "$STATUS" != "200" ]; then PASS=0; fi
+              CODE=$(kubectl exec test-runner -- sh -lc "curl -sS -o /dev/null -w '%{http_code}' \"$URL\"")
+              echo "Status: $CODE"
+              if [ "$CODE" != "200" ]; then PASS=0; fi
             done
 
             kubectl delete pod test-runner --ignore-not-found
-
             if [ "$PASS" != "1" ]; then
               echo "Integration tests FAILED for ${{ matrix.id }}"
               exit 1
             else
               echo "Integration tests PASSED for ${{ matrix.id }}"
             fi
-          EOF
+          EOSSH
