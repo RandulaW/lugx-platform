@@ -26,19 +26,19 @@ jobs:
             context: game-service
             image: game-service
             deployment: game-service
-            container: game-service
+            container: game
             test_urls: "http://game-service-svc.default.svc.cluster.local/healthz http://game-service-svc.default.svc.cluster.local/metrics"
           - id: order
             context: order-service
             image: order-service
             deployment: order-service
-            container: order-service
+            container: order
             test_urls: "http://order-service-svc.default.svc.cluster.local/healthz http://order-service-svc.default.svc.cluster.local/metrics"
           - id: analytics
             context: analytics-service
             image: analytics-service
             deployment: analytics-service
-            container: analytics-service
+            container: analytics
             test_urls: "http://analytics-service-svc.default.svc.cluster.local/healthz http://analytics-service-svc.default.svc.cluster.local/metrics"
 
     env:
