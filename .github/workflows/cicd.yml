@@ -1,0 +1,116 @@
+name: CI-CD (monorepo: build, deploy, test)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 */12 * * *"   # every 12h: tests only, no rebuild (saves cost)
+
+jobs:
+  build-deploy-test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Keep it gentle; GitHub runners do the heavy work, EC2 only rolls pods
+      max-parallel: 2
+      matrix:
+        include:
+          - id: frontend
+            context: frontend
+            image: lugx-frontend
+            deployment: frontend-deploy
+            container: frontend
+            test_urls: "http://frontend-service.default.svc.cluster.local/"
+          - id: game
+            context: game-service
+            image: game-service
+            deployment: game-service
+            container: game-service
+            test_urls: "http://game-service-svc.default.svc.cluster.local/healthz http://game-service-svc.default.svc.cluster.local/metrics"
+          - id: order
+            context: order-service
+            image: order-service
+            deployment: order-service
+            container: order-service
+            test_urls: "http://order-service-svc.default.svc.cluster.local/healthz http://order-service-svc.default.svc.cluster.local/metrics"
+          - id: analytics
+            context: analytics-service
+            image: analytics-service
+            deployment: analytics-service
+            container: analytics-service
+            test_urls: "http://analytics-service-svc.default.svc.cluster.local/healthz http://analytics-service-svc.default.svc.cluster.local/metrics"
+
+    env:
+      DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_NAMESPACE }}
+
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Log in to DockerHub (skip on schedule)
+        if: github.event_name != 'schedule'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set image tag (short SHA)
+        id: vars
+        run: echo "TAG=${GITHUB_SHA::12}" >> $GITHUB_OUTPUT
+
+      - name: Build & Push ${{ matrix.id }} (skip on schedule)
+        if: github.event_name != 'schedule'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}:${{ steps.vars.outputs.TAG }}
+            ${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}:latest
+
+      - name: Add EC2 to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > ec2_key
+          chmod 600 ec2_key
+
+      - name: Rolling update ${{ matrix.id }} (skip on schedule)
+        if: github.event_name != 'schedule'
+        run: |
+          ssh -i ec2_key -o StrictHostKeyChecking=yes ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << EOF
+            set -euo pipefail
+            kubectl set image deploy/${{ matrix.deployment }} ${{ matrix.container }}=${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image }}:${{ steps.vars.outputs.TAG }} --record
+            kubectl rollout status deploy/${{ matrix.deployment }} --timeout=180s
+          EOF
+
+      - name: Integration tests (always)
+        run: |
+          ssh -i ec2_key -o StrictHostKeyChecking=yes ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }} << 'EOF'
+            set -euo pipefail
+            kubectl delete pod test-runner --ignore-not-found
+            kubectl run test-runner --image=curlimages/curl:8.8.0 -i --restart=Never --command -- sleep 120 >/dev/null 2>&1 &
+            kubectl wait --for=condition=Ready --timeout=60s pod/test-runner
+
+            PASS=1
+            for URL in ${{ matrix.test_urls }}; do
+              echo "Testing: $URL"
+              kubectl exec test-runner -- sh -lc "curl -sS -o /dev/null -w '%{http_code}' $URL" > /tmp/status.txt
+              STATUS=$(cat /tmp/status.txt)
+              echo "Status: $STATUS"
+              if [ "$STATUS" != "200" ]; then PASS=0; fi
+            done
+
+            kubectl delete pod test-runner --ignore-not-found
+
+            if [ "$PASS" != "1" ]; then
+              echo "Integration tests FAILED for ${{ matrix.id }}"
+              exit 1
+            else
+              echo "Integration tests PASSED for ${{ matrix.id }}"
+            fi
+          EOF
