@@ -28,4 +28,3 @@ window.addEventListener("scroll", () => {
   if (y > 100) sendEvent("scroll_depth_100");
   if (y > 500) sendEvent("scroll_depth_500");
 });
-
