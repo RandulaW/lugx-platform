@@ -1,4 +1,4 @@
-name: CI-CD (monorepo: build, deploy, test)
+name: "CI-CD (monorepo: build, deploy, test)"
 
 on:
   push:
