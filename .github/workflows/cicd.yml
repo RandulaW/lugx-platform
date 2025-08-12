@@ -19,7 +19,7 @@ jobs:
           - id: frontend
             context: frontend
             image: lugx-frontend
-            deployment: frontend-deploy
+            deployment: lugx-frontend
             container: frontend
             test_urls: "http://frontend-service.default.svc.cluster.local/"
           - id: game
