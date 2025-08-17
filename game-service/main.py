@@ -51,4 +51,3 @@ def healthz():
 # Enable Prometheus metrics to /metrics
 Instrumentator().instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
-# test ci-cd
