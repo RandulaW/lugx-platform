@@ -12,7 +12,7 @@ on:
       - '.github/workflows/ci-cd.yml'
   workflow_dispatch: {}
   schedule:
-    - cron: "0 */12 * * *"   # tests-only every 12h
+    - cron: "0 */12 * * *"
 
 jobs:
   detect:
@@ -93,7 +93,7 @@ jobs:
                                                   || (matrix.name == 'frontend'          && needs.detect.outputs.frontend == 'true') ) }}
         run: echo "TAG=gha-${GITHUB_SHA::7}" >> $GITHUB_ENV
 
-      - name: Build & push image
+      - name: Build & Push Docker Image
         if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')
                                                   || (matrix.name == 'order-service'     && needs.detect.outputs.order == 'true')
                                                   || (matrix.name == 'analytics-service' && needs.detect.outputs.analytics == 'true')
@@ -105,7 +105,7 @@ jobs:
           docker tag "$IMAGE" "${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image_name }}:latest"
           docker push "${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image_name }}:latest"
 
-      - name: Copy tests to EC2
+      - name: Copy Integration Job to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -114,7 +114,7 @@ jobs:
           source: "tests/integration-job.yaml"
           target: "~/lugx-microservices/tests/"
 
-      - name: Deploy GREEN on EC2 & Test
+      - name: Deploy & Switch to GREEN + Run Integration
         if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')
                                                   || (matrix.name == 'order-service'     && needs.detect.outputs.order == 'true')
                                                   || (matrix.name == 'analytics-service' && needs.detect.outputs.analytics == 'true')
@@ -145,7 +145,7 @@ jobs:
             kubectl logs job/integration-tests --tail=-1
             kubectl patch svc ${{ matrix.svc }} -p "{\"spec\": {\"selector\": {\"app\": \"${{ matrix.green_app }}\"}}}"
 
-      - name: Run tests only on schedule
+      - name: Scheduled Tests (No Deploy)
         if: ${{ github.event_name == 'schedule' }}
         uses: appleboy/ssh-action@v1.2.0
         with:

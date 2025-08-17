@@ -13,20 +13,32 @@ spec:
           command: ["/bin/sh","-lc"]
           args:
             - |
-              set -e
-              urls="
-              http://lugx-service.default.svc.cluster.local/
-              http://game-service-svc.default.svc.cluster.local/healthz
-              http://game-service-svc.default.svc.cluster.local/metrics
-              http://order-service-svc.default.svc.cluster.local/healthz
-              http://order-service-svc.default.svc.cluster.local/metrics
-              http://analytics-service-svc.default.svc.cluster.local/healthz
-              http://analytics-service-svc.default.svc.cluster.local/metrics
-              "
+              set -eux
+
               fail=0
-              for u in $urls; do
-                code=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 "$u" || true)
-                echo "$u -> $code"
-                [ "$code" = "200" ] || fail=1
+
+              echo "=== Healthz Checks ==="
+              for u in \
+                http://game-service-svc.default.svc.cluster.local/healthz \
+                http://order-service-svc.default.svc.cluster.local/healthz \
+                http://analytics-service-svc.default.svc.cluster.local/healthz \
+                http://lugx-service.default.svc.cluster.local/; do
+                  code=$(curl -sS -o /dev/null -w "%{http_code}" "$u" || true)
+                  echo "$u -> $code"
+                  [ "$code" = "200" ] || fail=1
               done
+
+              echo "=== Functional POST/GET ==="
+              # Game-service
+              curl -sS -X POST http://game-service-svc.default.svc.cluster.local/games -H "Content-Type: application/json" -d '{"title":"Halo"}'
+              curl -sS http://game-service-svc.default.svc.cluster.local/games | grep "Halo" || fail=1
+
+              # Order-service
+              curl -sS -X POST http://order-service-svc.default.svc.cluster.local/orders -H "Content-Type: application/json" -d '{"item":"Book"}'
+              curl -sS http://order-service-svc.default.svc.cluster.local/orders | grep "Book" || fail=1
+
+              # Analytics-service
+              curl -sS -X POST http://analytics-service-svc.default.svc.cluster.local/track -H "Content-Type: application/json" -d '{"event":"Login"}'
+              curl -sS http://analytics-service-svc.default.svc.cluster.local/events | grep "Login" || fail=1
+
               exit $fail
