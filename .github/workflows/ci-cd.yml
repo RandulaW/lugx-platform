@@ -1,0 +1,160 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'game-service/**'
+      - 'order-service/**'
+      - 'analytics-service/**'
+      - 'frontend/**'
+      - 'tests/**'
+      - '.github/workflows/ci-cd.yml'
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 */12 * * *"   # tests-only every 12h
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      game:      ${{ steps.filter.outputs.game }}
+      order:     ${{ steps.filter.outputs.order }}
+      analytics: ${{ steps.filter.outputs.analytics }}
+      frontend:  ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            game:      'game-service/**'
+            order:     'order-service/**'
+            analytics: 'analytics-service/**'
+            frontend:  'frontend/**'
+
+  build-deploy-test:
+    needs: detect
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: game-service
+            path: game-service
+            manifest: game-service/game-deploy.yaml
+            image_name: game-service
+            svc: game-service-svc
+            blue_app: game-service
+            green_app: game-service-green
+
+          - name: order-service
+            path: order-service
+            manifest: order-service/order-deploy.yaml
+            image_name: order-service
+            svc: order-service-svc
+            blue_app: order-service
+            green_app: order-service-green
+
+          - name: analytics-service
+            path: analytics-service
+            manifest: analytics-service/analytics-deploy.yaml
+            image_name: analytics-service
+            svc: analytics-service-svc
+            blue_app: analytics-service
+            green_app: analytics-service-green
+
+          - name: frontend
+            path: frontend
+            manifest: frontend/lugx-deployment.yaml
+            image_name: lugx-frontend
+            svc: lugx-service
+            blue_app: lugx-frontend
+            green_app: lugx-frontend-green
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Docker login
+        if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')
+                                                  || (matrix.name == 'order-service'     && needs.detect.outputs.order == 'true')
+                                                  || (matrix.name == 'analytics-service' && needs.detect.outputs.analytics == 'true')
+                                                  || (matrix.name == 'frontend'          && needs.detect.outputs.frontend == 'true') ) }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute TAG
+        if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')
+                                                  || (matrix.name == 'order-service'     && needs.detect.outputs.order == 'true')
+                                                  || (matrix.name == 'analytics-service' && needs.detect.outputs.analytics == 'true')
+                                                  || (matrix.name == 'frontend'          && needs.detect.outputs.frontend == 'true') ) }}
+        run: echo "TAG=gha-${GITHUB_SHA::7}" >> $GITHUB_ENV
+
+      - name: Build & push image
+        if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')
+                                                  || (matrix.name == 'order-service'     && needs.detect.outputs.order == 'true')
+                                                  || (matrix.name == 'analytics-service' && needs.detect.outputs.analytics == 'true')
+                                                  || (matrix.name == 'frontend'          && needs.detect.outputs.frontend == 'true') ) }}
+        run: |
+          IMAGE="${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image_name }}:${{ env.TAG }}"
+          docker build -t "$IMAGE" "${{ matrix.path }}"
+          docker push "$IMAGE"
+          docker tag "$IMAGE" "${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image_name }}:latest"
+          docker push "${{ secrets.DOCKERHUB_NAMESPACE }}/${{ matrix.image_name }}:latest"
+
+      - name: Copy tests to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "tests/integration-job.yaml"
+          target: "~/lugx-microservices/tests/"
+
+      - name: Deploy GREEN on EC2 & Test
+        if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')
+                                                  || (matrix.name == 'order-service'     && needs.detect.outputs.order == 'true')
+                                                  || (matrix.name == 'analytics-service' && needs.detect.outputs.analytics == 'true')
+                                                  || (matrix.name == 'frontend'          && needs.detect.outputs.frontend == 'true') ) }}
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          TAG: ${{ env.TAG }}
+          DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_NAMESPACE }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: TAG,DOCKERHUB_NAMESPACE
+          script: |
+            set -euxo pipefail
+            cp ~/lugx-microservices/${{ matrix.manifest }} /tmp/green.yaml
+            if grep -q '^---' /tmp/green.yaml; then
+              sed -i '1,/^---/!d' /tmp/green.yaml
+            fi
+            sed -i "s/^  name: \${{ matrix.blue_app }}/  name: \${{ matrix.green_app }}/" /tmp/green.yaml
+            sed -i "s/app: \${{ matrix.blue_app }}/app: \${{ matrix.green_app }}/g" /tmp/green.yaml
+            sed -i "s|image: .*|image: ${DOCKERHUB_NAMESPACE}/${{ matrix.image_name }}:${TAG}|" /tmp/green.yaml
+            kubectl apply -f /tmp/green.yaml
+            kubectl rollout status deployment/${{ matrix.green_app }} --timeout=300s
+            kubectl delete job/integration-tests --ignore-not-found
+            kubectl apply -f ~/lugx-microservices/tests/integration-job.yaml
+            kubectl wait --for=condition=complete job/integration-tests --timeout=300s
+            kubectl logs job/integration-tests --tail=-1
+            kubectl patch svc ${{ matrix.svc }} -p "{\"spec\": {\"selector\": {\"app\": \"${{ matrix.green_app }}\"}}}"
+
+      - name: Run tests only on schedule
+        if: ${{ github.event_name == 'schedule' }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -euxo pipefail
+            kubectl delete job/integration-tests --ignore-not-found
+            kubectl apply -f ~/lugx-microservices/tests/integration-job.yaml
+            kubectl wait --for=condition=complete job/integration-tests --timeout=300s
+            kubectl logs job/integration-tests --tail=-1
