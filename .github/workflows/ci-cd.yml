@@ -112,7 +112,7 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           source: "tests/integration-job.yaml"
-          target: "~/lugx-microservices/ci-tests/"
+          target: "~/lugx-microservices/tests/ci-tests/"
 
       - name: Deploy & Switch to GREEN + Run Integration
         if: ${{ github.event_name != 'schedule' && ( (matrix.name == 'game-service'      && needs.detect.outputs.game == 'true')

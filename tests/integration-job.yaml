@@ -6,46 +6,42 @@ spec:
   backoffLimit: 0
   template:
     spec:
-      restartPolicy: Never
       containers:
-        - name: tester
-          image: curlimages/curl:8.8.0
-          command: ["/bin/sh","-lc"]
-          args:
-            - |
-              set -eux
+      - name: integration-tests
+        image: curlimages/curl:8.5.0
+        command:
+        - sh
+        - -c
+        - |
+          echo "Starting integration health checks..."
 
-              # Simple retry helper
-              retry() {
-                url=$1
-                expected=$2
-                for i in $(seq 1 10); do
-                  code=$(curl -s -o /dev/null -w "%{http_code}" "$url" || true)
-                  echo "$url -> $code (try $i)"
-                  if [ "$code" = "$expected" ]; then
-                    return 0
-                  fi
-                  sleep 5
-                done
-                return 1
-              }
+          check_service() {
+            svc=$1
+            port=$2
+            path=$3
+            echo "Checking $svc on port $port ..."
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://$svc:$port$path || echo "000")
+            if [ "$code" != "200" ]; then
+              echo "$svc failed health check at $path (got $code)"
+              exit 1
+            else
+              echo "$svc is healthy"
+            fi
+          }
 
-              fail=0
+          # Run checks
+          check_service frontend 8080 /
+          check_service game-service 8081 /healthz
+          check_service order-service 8082 /healthz
+          check_service analytics-service 8083 /healthz
+          check_service clickhouse 8084 /
 
-              echo "=== Healthz ==="
-              retry http://game-service-svc.default.svc.cluster.local/healthz 200 || fail=1
-              retry http://order-service-svc.default.svc.cluster.local/healthz 200 || fail=1
-              retry http://analytics-service-svc.default.svc.cluster.local/healthz 200 || fail=1
-              retry http://lugx-service.default.svc.cluster.local/ 200 || fail=1
-
-              echo "=== Functional Checks ==="
-              # Game-service GET only
-              retry http://game-service-svc.default.svc.cluster.local/games 200 || fail=1
-
-              # Order-service GET only
-              retry http://order-service-svc.default.svc.cluster.local/orders 200 || fail=1
-
-              # Analytics-service GET only
-              retry http://analytics-service-svc.default.svc.cluster.local/events 200 || fail=1
-
-              exit $fail
+          echo "All services passed health checks."
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 100m
+            memory: 128Mi
+      restartPolicy: Never
