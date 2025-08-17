@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: game-mysql-secret
+stringData:
+  root-password: rootpass
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: game-mysql-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: game-mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: game-mysql
+  template:
+    metadata:
+      labels:
+        app: game-mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:8.0
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: game-mysql-secret
+              key: root-password
+        - name: MYSQL_DATABASE
+          value: lugx_games
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - mountPath: /var/lib/mysql
+          name: storage
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: game-mysql-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: game-mysql-svc
+spec:
+  selector:
+    app: game-mysql
+  ports:
+  - port: 3306

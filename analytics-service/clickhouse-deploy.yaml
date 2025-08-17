@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: clickhouse-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Enable Prometheus exporter on :9363/metrics
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+data:
+  config.xml: |
+    <clickhouse>
+      <listen_host>0.0.0.0</listen_host>
+      <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+      </prometheus>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clickhouse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:latest
+          ports:
+            - containerPort: 8123  # HTTP UI / API
+            - containerPort: 9363  # Prometheus metrics
+          env:
+            - name: CLICKHOUSE_USER
+              value: default
+            - name: CLICKHOUSE_PASSWORD
+              value: ""
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          volumeMounts:
+            - mountPath: /var/lib/clickhouse
+              name: ch-storage
+            - mountPath: /etc/clickhouse-server/config.d
+              name: ch-config
+      volumes:
+        - name: ch-storage
+          persistentVolumeClaim:
+            claimName: clickhouse-pvc
+        - name: ch-config
+          configMap:
+            name: clickhouse-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-svc
+spec:
+  selector:
+    app: clickhouse
+  type: NodePort
+  ports:
+    - port: 8123
+      targetPort: 8123
+      nodePort: 30084
+---
+# Simple ClusterIP Service for Prometheus scraping of metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse-metrics-svc
+  labels:
+    app: clickhouse
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9363"
+    prometheus.io/path: "/metrics"
+spec:
+  selector:
+    app: clickhouse
+  type: ClusterIP
+  ports:
+    - name: metrics
+      port: 9363
+      targetPort: 9363

@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lugx-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lugx-frontend
+  template:
+    metadata:
+      labels:
+        app: lugx-frontend
+    spec:
+      containers:
+        - name: lugx-frontend
+          image: janindudocker/lugx-frontend:latest
+          ports:
+            - containerPort: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lugx-service
+spec:
+  selector:
+    app: lugx-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080
+  type: NodePort
