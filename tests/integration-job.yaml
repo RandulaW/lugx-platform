@@ -6,42 +6,29 @@ spec:
   backoffLimit: 0
   template:
     spec:
+      restartPolicy: Never
       containers:
       - name: integration-tests
-        image: curlimages/curl:8.5.0
+        image: curlimages/curl:8.6.0
         command:
         - sh
         - -c
         - |
-          echo "Starting integration health checks..."
+          set -e
 
-          check_service() {
-            svc=$1
-            port=$2
-            path=$3
-            echo "Checking $svc on port $port ..."
-            code=$(curl -s -o /dev/null -w "%{http_code}" http://$svc:$port$path || echo "000")
-            if [ "$code" != "200" ]; then
-              echo "$svc failed health check at $path (got $code)"
-              exit 1
-            else
-              echo "$svc is healthy"
-            fi
-          }
+          echo "Checking Frontend..."
+          curl -sf http://lugx-service || exit 1
 
-          # Run checks
-          check_service frontend 8080 /
-          check_service game-service 8081 /healthz
-          check_service order-service 8082 /healthz
-          check_service analytics-service 8083 /healthz
-          check_service clickhouse 8084 /
+          echo "Checking Game-Service..."
+          curl -sf http://game-service-svc/healthz || exit 1
 
-          echo "All services passed health checks."
-        resources:
-          requests:
-            cpu: 50m
-            memory: 64Mi
-          limits:
-            cpu: 100m
-            memory: 128Mi
-      restartPolicy: Never
+          echo "Checking Order-Service..."
+          curl -sf http://order-service-svc/healthz || exit 1
+
+          echo "Checking Analytics-Service..."
+          curl -sf http://analytics-service-svc:3000/healthz || exit 1
+
+          echo "Checking ClickHouse..."
+          curl -sf http://clickhouse-svc:8123 || exit 1
+
+          echo "All services are healthy"
