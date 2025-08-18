@@ -33,7 +33,7 @@ def add_game(g: Game):
     )
     conn.commit()
     conn.close()
-    return {"status": "Game added"}
+    return {"status": "Game added!"}
 
 @app.get("/games")
 def list_games():
